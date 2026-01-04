@@ -1,0 +1,63 @@
+{
+  "app": {
+    "name": "Swing Trading Oslo Børs",
+    "version": "1.0.0",
+    "port": 3000
+  },
+  "database": {
+    "path": "./database/trading.db",
+    "backup_interval_hours": 24
+  },
+  "agents": {
+    "news_scraper": {
+      "enabled": true,
+      "schedule": "*/15 * * * *",
+      "source": "newsweb",
+      "base_url": "https://newsweb.oslobors.no/search?issuer=",
+      "timeout_ms": 30000
+    },
+    "screener": {
+      "enabled": true,
+      "schedule": "0 18 * * *",
+      "criteria": {
+        "rsi_min": 30,
+        "rsi_max": 70,
+        "volume_spike": 1.5,
+        "price_change_threshold": 0.03
+      },
+      "top_results": 10
+    },
+    "alerts": {
+      "enabled": true,
+      "schedule": "*/5 * * * *",
+      "alert_types": ["price_change", "volume_spike", "news_event"]
+    }
+  },
+  "mcp_servers": {
+    "news_scraper": {
+      "path": "./mcp-servers/news-scraper",
+      "port": 3001
+    },
+    "screener": {
+      "path": "./mcp-servers/screener",
+      "port": 3002
+    },
+    "alerts": {
+      "path": "./mcp-servers/alerts",
+      "port": 3003
+    }
+  },
+  "api": {
+    "claude": {
+      "model": "claude-3-5-sonnet-20241022",
+      "max_tokens": 4000,
+      "cache_duration_minutes": 30
+    },
+    "yahoo_finance": {
+      "timeout_ms": 10000
+    }
+  },
+  "tickers": {
+    "oslo_bors": ["MOWI", "VAR", "YAR", "NEL", "SALM", "EQNR", "DNB", "ORK", "STB", "TGS"]
+  }
+}

@@ -1,0 +1,69 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+database/*.db
+
+# Build outputs
+dist/
+build/
+frontend/dist/
+frontend/build/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temp files
+*.tmp
+.cache/
+.temp/
+
+# MCP Server outputs
+mcp-servers/*/dist/
+mcp-servers/*/build/
+mcp-servers/*/node_modules/
+
+# System files
+Thumbs.db
+desktop.ini
+*.lock
+package-lock.json.backup
+
+# Project docs (private)
+CLAUDE.md
+QUICKSTART.md

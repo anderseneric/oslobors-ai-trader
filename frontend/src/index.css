@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #000000;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: #000000;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* AI-Tech Glassmorphism Enhancement */
+@layer components {
+  .btn-primary {
+    @apply bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-all;
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+  }
+
+  .btn-secondary {
+    @apply bg-gray-800/80 hover:bg-gray-700/80 text-white font-medium py-2 px-4 rounded-lg transition-all border border-blue-500/20;
+    backdrop-filter: blur(12px);
+  }
+
+  .card {
+    @apply bg-gray-900/40 rounded-xl border border-blue-500/20;
+    backdrop-filter: blur(16px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(59, 130, 246, 0.1);
+  }
+
+  .card:hover {
+    border-color: rgba(59, 130, 246, 0.3);
+    box-shadow: 0 8px 32px rgba(59, 130, 246, 0.2), 0 0 0 1px rgba(59, 130, 246, 0.2);
+  }
+
+  .input {
+    @apply bg-black/60 border border-blue-500/30 text-white rounded-lg px-4 py-2 transition-all;
+    backdrop-filter: blur(12px);
+  }
+
+  .input:focus {
+    @apply outline-none ring-2 ring-blue-500/50 border-blue-500/50;
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.2);
+  }
+
+  /* AI-Tech Glow Effects */
+  .ai-glow-blue {
+    box-shadow: 0 0 30px rgba(59, 130, 246, 0.3);
+  }
+
+  .ai-glow-purple {
+    box-shadow: 0 0 30px rgba(139, 92, 246, 0.3);
+  }
+
+  .ai-glow-cyan {
+    box-shadow: 0 0 30px rgba(6, 182, 212, 0.3);
+  }
+}
