@@ -2,15 +2,15 @@ import cron from 'node-cron';
 import { scrapeMultipleTickers } from '../mcp-servers/news-scraper/scraper.js';
 import { getTopMovers } from '../backend/services/top-movers.js';
 import { analyzeBatchSentiment } from '../backend/services/sentiment-analyzer.js';
+import { saveNotification, getPortfolio } from '../backend/database.js';
 import sqlite3 from 'sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
 
-dotenv.config();
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+dotenv.config({ path: join(__dirname, '../.env'), override: true });
 
 const dbPath = process.env.DATABASE_PATH || join(__dirname, '../database/trading.db');
 
@@ -65,23 +65,89 @@ async function saveNewsToDatabase(newsItems, sentiments) {
 }
 
 /**
+ * Create notifications for high-impact news on portfolio stocks
+ */
+async function createNewsNotifications(newsItems, sentiments) {
+  try {
+    // Get portfolio tickers to only notify for stocks we own
+    const portfolio = await getPortfolio();
+    const portfolioTickers = new Set(portfolio.map(p => p.ticker));
+
+    let notificationCount = 0;
+
+    for (let i = 0; i < newsItems.length; i++) {
+      const item = newsItems[i];
+      const sentiment = sentiments[i] || { sentiment: 'neutral', confidence: 0.0 };
+
+      // Only notify for portfolio stocks with high-confidence negative or positive news
+      if (!portfolioTickers.has(item.ticker)) continue;
+      if (sentiment.confidence < 0.7) continue; // Only high confidence
+
+      // Create notification for bearish news (potential sell signal)
+      if (sentiment.sentiment === 'bearish') {
+        await saveNotification({
+          notification_type: 'news_alert',
+          ticker: item.ticker,
+          title: `Negative News: ${item.ticker}`,
+          message: `${item.title} (${Math.round(sentiment.confidence * 100)}% confidence)`,
+          severity: 'high'
+        });
+        notificationCount++;
+      }
+
+      // Create notification for bullish news (confirmation)
+      if (sentiment.sentiment === 'bullish' && sentiment.confidence >= 0.8) {
+        await saveNotification({
+          notification_type: 'news_alert',
+          ticker: item.ticker,
+          title: `Positive News: ${item.ticker}`,
+          message: `${item.title} (${Math.round(sentiment.confidence * 100)}% confidence)`,
+          severity: 'info'
+        });
+        notificationCount++;
+      }
+    }
+
+    if (notificationCount > 0) {
+      console.log(`[News Agent] Created ${notificationCount} news notifications`);
+    }
+  } catch (error) {
+    console.error('[News Agent] Error creating notifications:', error.message);
+  }
+}
+
+/**
  * Run news scraper
  */
 export async function runNewsScraper() {
   console.log('\n[News Agent] Starting news scraper...');
 
   try {
-    // Get top movers instead of fixed tickers
-    const topMovers = await getTopMovers(TOP_MOVERS_LIMIT);
-    const tickers = topMovers.map(m => m.ticker);
+    // Default major Oslo Børs tickers to always scrape
+    const defaultTickers = [
+      'EQNR', 'MOWI', 'DNB', 'TEL', 'YAR', 'VAR', 'ORK',
+      'SALM', 'NHY', 'AKSO', 'BAKKA', 'SUBC', 'XXL', 'KOG', 'AUTOSTR'
+    ];
 
-    if (tickers.length === 0) {
-      console.log('[News Agent] No significant market movers found');
-      console.log('[News Agent] ✓ Complete\n');
-      return;
+    let tickers = [];
+
+    // Try to get top movers, but fallback to defaults if it fails
+    try {
+      const topMovers = await getTopMovers(TOP_MOVERS_LIMIT);
+      tickers = topMovers.map(m => m.ticker);
+
+      if (tickers.length === 0) {
+        console.log('[News Agent] No top movers found, using default tickers');
+        tickers = defaultTickers;
+      } else {
+        console.log(`[News Agent] Scraping ${tickers.length} top movers: ${tickers.join(', ')}`);
+      }
+    } catch (error) {
+      console.log(`[News Agent] Top movers failed (${error.message}), using default tickers`);
+      tickers = defaultTickers;
     }
 
-    console.log(`[News Agent] Scraping ${tickers.length} top movers: ${tickers.join(', ')}`);
+    console.log(`[News Agent] Fetching news for ${tickers.length} tickers`);
 
     const result = await scrapeMultipleTickers(tickers, 10);
 
@@ -92,6 +158,9 @@ export async function runNewsScraper() {
 
       // Save to database with sentiment
       await saveNewsToDatabase(result.news, sentiments);
+
+      // Create notifications for high-impact news on portfolio stocks
+      await createNewsNotifications(result.news, sentiments);
     } else {
       console.log('[News Agent] No news found');
     }

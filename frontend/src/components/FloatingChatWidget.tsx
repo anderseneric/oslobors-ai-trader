@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { MessageCircle, Send, Bot, User, X, Minus } from 'lucide-react'
+import { MessageCircle, Send, Bot, User, X, Minus, Sparkles } from 'lucide-react'
 import { chatAPI } from '../services/api'
 import type { ChatMessage } from '../types'
 
@@ -66,7 +66,7 @@ export default function FloatingChatWidget() {
   const initializeWelcomeMessage = () => {
     setMessages([{
       role: 'assistant',
-      content: `Hei! I'm your AI trading advisor.
+      content: `Hei! I'm your AI trading advisor for Oslo Børs.
 
 Ask me about your portfolio, trades, or market news.`,
       timestamp: new Date().toISOString()
@@ -163,19 +163,20 @@ Ask me about your portfolio, trades, or market news.`,
       {(!isOpen || isMinimized) && (
         <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end space-y-3">
           {/* Tooltip Bubble */}
-          <div className="bg-gradient-to-r from-blue-600 to-purple-600 text-white px-4 py-2 rounded-2xl shadow-lg text-sm font-medium whitespace-nowrap animate-bounce-subtle">
+          <div className="relative bg-amber-500 text-navy-900 px-4 py-2 rounded-xl shadow-lg text-sm font-semibold whitespace-nowrap animate-bounce-subtle">
+            <Sparkles className="w-4 h-4 inline mr-1" />
             Need trading insights?
-            <div className="absolute -bottom-1 right-6 w-3 h-3 bg-purple-600 transform rotate-45"></div>
+            <div className="absolute -bottom-1 right-6 w-3 h-3 bg-amber-500 transform rotate-45"></div>
           </div>
 
           {/* Chat Button */}
           <button
             onClick={handleOpen}
-            className="relative w-16 h-16 bg-gradient-to-br from-blue-600 to-purple-600 rounded-full shadow-2xl hover:shadow-blue-500/50 transition-all duration-300 flex items-center justify-center group hover:scale-110"
+            className="relative w-14 h-14 bg-amber-500 hover:bg-amber-400 rounded-full shadow-lg shadow-amber-500/20 transition-all duration-300 flex items-center justify-center group hover:scale-105"
           >
-            <MessageCircle className="w-8 h-8 text-white" />
+            <MessageCircle className="w-7 h-7 text-navy-900" />
             {hasNewMessage && (
-              <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full border-2 border-white flex items-center justify-center text-xs font-bold text-white z-10">
+              <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full border-2 border-navy-900 flex items-center justify-center text-xs font-bold text-white z-10">
                 !
               </span>
             )}
@@ -185,36 +186,39 @@ Ask me about your portfolio, trades, or market news.`,
 
       {/* Chat Modal */}
       {isOpen && !isMinimized && (
-        <div className="fixed bottom-6 right-6 w-[400px] h-[600px] bg-gray-900/90 backdrop-blur-xl rounded-2xl shadow-2xl border border-blue-500/20 flex flex-col z-50 animate-slideUp">
+        <div className="fixed bottom-6 right-6 w-[380px] h-[550px] bg-navy-900 rounded-xl shadow-2xl border border-white/10 flex flex-col z-50 animate-slideUp overflow-hidden">
           {/* Header */}
-          <div className="flex items-center justify-between p-4 border-b border-blue-500/20 bg-gradient-to-r from-blue-600 to-purple-600 rounded-t-2xl">
+          <div className="flex items-center justify-between p-4 border-b border-white/10 bg-navy-800">
             <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center">
-                <Bot className="w-6 h-6 text-white" />
+              <div className="w-10 h-10 rounded-lg bg-amber-500 flex items-center justify-center">
+                <Bot className="w-6 h-6 text-navy-900" />
               </div>
               <div>
                 <h3 className="font-bold text-white">AI Trading Assistant</h3>
-                <p className="text-xs text-blue-100">Always here to help</p>
+                <div className="flex items-center space-x-1">
+                  <div className="w-2 h-2 rounded-full bg-profit animate-pulse"></div>
+                  <p className="text-xs text-neutral">Online</p>
+                </div>
               </div>
             </div>
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-1">
               <button
                 onClick={handleMinimize}
-                className="w-8 h-8 hover:bg-white/20 rounded-lg transition-colors flex items-center justify-center"
+                className="w-8 h-8 hover:bg-white/10 rounded-lg transition-colors flex items-center justify-center"
               >
-                <Minus className="w-5 h-5 text-white" />
+                <Minus className="w-4 h-4 text-neutral" />
               </button>
               <button
                 onClick={handleClose}
-                className="w-8 h-8 hover:bg-white/20 rounded-lg transition-colors flex items-center justify-center"
+                className="w-8 h-8 hover:bg-white/10 rounded-lg transition-colors flex items-center justify-center"
               >
-                <X className="w-5 h-5 text-white" />
+                <X className="w-4 h-4 text-neutral" />
               </button>
             </div>
           </div>
 
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-black">
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-navy-900/50">
             {messages.map((message, index) => (
               <div
                 key={index}
@@ -222,28 +226,28 @@ Ask me about your portfolio, trades, or market news.`,
               >
                 <div className={`flex items-start space-x-2 max-w-[85%] ${message.role === 'user' ? 'flex-row-reverse space-x-reverse' : ''}`}>
                   {/* Avatar */}
-                  <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${
+                  <div className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center ${
                     message.role === 'user'
-                      ? 'bg-blue-600'
-                      : 'bg-gradient-to-br from-purple-600 to-blue-600'
+                      ? 'bg-white/10'
+                      : 'bg-amber-500'
                   }`}>
                     {message.role === 'user' ? (
                       <User className="w-4 h-4 text-white" />
                     ) : (
-                      <Bot className="w-4 h-4 text-white" />
+                      <Bot className="w-4 h-4 text-navy-900" />
                     )}
                   </div>
 
                   {/* Message Bubble */}
-                  <div className={`flex-1 ${message.role === 'user' ? 'text-right' : ''}`}>
-                    <div className={`inline-block rounded-2xl px-4 py-2 text-sm ${
+                  <div className="flex-1">
+                    <div className={`inline-block rounded-xl px-4 py-2.5 text-sm ${
                       message.role === 'user'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-900/80 backdrop-blur-md border border-blue-500/10 text-gray-100'
+                        ? 'bg-amber-500 text-navy-900'
+                        : 'bg-navy-800 border border-white/10 text-white'
                     }`}>
-                      <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                      <div className="whitespace-pre-wrap break-words text-left">{message.content}</div>
                     </div>
-                    <div className="text-xs text-gray-500 mt-1 px-2">
+                    <div className={`text-xs text-neutral mt-1 px-1 ${message.role === 'user' ? 'text-right' : ''}`}>
                       {formatTime(message.timestamp)}
                     </div>
                   </div>
@@ -255,14 +259,14 @@ Ask me about your portfolio, trades, or market news.`,
             {loading && (
               <div className="flex justify-start">
                 <div className="flex items-start space-x-2">
-                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-purple-600 to-blue-600 flex items-center justify-center">
-                    <Bot className="w-4 h-4 text-white" />
+                  <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-amber-500 flex items-center justify-center">
+                    <Bot className="w-4 h-4 text-navy-900" />
                   </div>
-                  <div className="bg-gray-900/80 backdrop-blur-md border border-blue-500/10 rounded-2xl px-4 py-2">
-                    <div className="flex space-x-1">
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                  <div className="bg-navy-800 border border-white/10 rounded-xl px-4 py-3">
+                    <div className="flex space-x-1.5">
+                      <div className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                      <div className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                      <div className="w-2 h-2 bg-amber-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
                     </div>
                   </div>
                 </div>
@@ -273,7 +277,7 @@ Ask me about your portfolio, trades, or market news.`,
           </div>
 
           {/* Input Area */}
-          <div className="p-4 border-t border-blue-500/20 bg-black/40 backdrop-blur-md">
+          <div className="p-3 border-t border-white/10 bg-navy-800">
             <div className="flex space-x-2 mb-2">
               <input
                 ref={inputRef}
@@ -282,13 +286,13 @@ Ask me about your portfolio, trades, or market news.`,
                 onChange={(e) => setInput(e.target.value)}
                 onKeyPress={handleKeyPress}
                 placeholder="Ask me anything..."
-                className="flex-1 bg-black/60 border border-blue-500/30 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="flex-1 bg-navy-900 border border-white/10 rounded-lg px-3 py-2.5 text-sm text-white placeholder-neutral focus:outline-none focus:border-amber-500 transition-colors"
                 disabled={loading}
               />
               <button
                 onClick={handleSend}
                 disabled={!input.trim() || loading}
-                className={`bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-4 py-2 transition-colors flex items-center ${
+                className={`bg-amber-500 hover:bg-amber-400 text-navy-900 rounded-lg px-4 py-2 transition-colors flex items-center font-semibold ${
                   !input.trim() || loading ? 'opacity-50 cursor-not-allowed' : ''
                 }`}
               >
@@ -300,11 +304,11 @@ Ask me about your portfolio, trades, or market news.`,
             <div className="flex items-center justify-between text-xs">
               <button
                 onClick={clearHistory}
-                className="text-gray-400 hover:text-white transition-colors"
+                className="text-neutral hover:text-white transition-colors"
               >
                 Clear history
               </button>
-              <span className="text-gray-500">{messages.length} messages</span>
+              <span className="text-neutral">{messages.length} messages</span>
             </div>
           </div>
         </div>

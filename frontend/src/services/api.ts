@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { Stock, PortfolioPosition, PriceHistory, AIAnalysis, NewsItem, Recommendation, ChatMessage, TipInsight, DailyDigest } from '../types';
+import type { Stock, PortfolioPosition, PriceHistory, AIAnalysis, NewsItem, Recommendation, ChatMessage, TipInsight, DailyDigest, InsiderTransaction, InsiderTickerSummary, InsiderOpportunity } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
@@ -284,6 +284,14 @@ export const notificationsAPI = {
     return response.data;
   },
 
+  clearAll: async () => {
+    const response = await api.delete<{
+      success: boolean;
+      message: string;
+    }>('/api/notifications/clear');
+    return response.data;
+  },
+
   getPreferences: async () => {
     const response = await api.get<{
       success: boolean;
@@ -314,6 +322,55 @@ export const notificationsAPI = {
       success: boolean;
       message: string;
     }>(`/api/notifications/preferences/${id}`);
+    return response.data;
+  },
+};
+
+// Insider Trading API
+export const insiderAPI = {
+  getTransactions: async (ticker?: string, days: number = 90) => {
+    const params = new URLSearchParams();
+    if (ticker) params.append('ticker', ticker);
+    params.append('days', days.toString());
+    const query = params.toString() ? `?${params.toString()}` : '';
+
+    const response = await api.get<{
+      success: boolean;
+      data: InsiderTransaction[];
+      count: number;
+    }>(`/api/insider/transactions${query}`);
+    return response.data;
+  },
+
+  getSummary: async (ticker: string, days: number = 30) => {
+    const response = await api.get<{
+      success: boolean;
+      ticker: string;
+      summary: InsiderTickerSummary['summary'];
+      score: number;
+      signal: string;
+      scoreDetails: InsiderTickerSummary['scoreDetails'];
+      recentTransactions: InsiderTransaction[];
+    }>(`/api/insider/summary/${ticker}?days=${days}`);
+    return response.data;
+  },
+
+  getTopBuys: async (days: number = 7, limit: number = 10) => {
+    const response = await api.get<{
+      success: boolean;
+      data: InsiderOpportunity[];
+      count: number;
+    }>(`/api/insider/top-buys?days=${days}&limit=${limit}`);
+    return response.data;
+  },
+
+  parseFromNews: async () => {
+    const response = await api.post<{
+      success: boolean;
+      parsed: number;
+      saved: number;
+      skipped: number;
+    }>('/api/insider/parse-from-news');
     return response.data;
   },
 };

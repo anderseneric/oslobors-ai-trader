@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Bell, X, Check, CheckCheck, AlertCircle, TrendingUp, Newspaper } from 'lucide-react'
+import { Bell, X, Check, CheckCheck, AlertCircle, TrendingUp, Newspaper, Trash2 } from 'lucide-react'
 import { notificationsAPI } from '../services/api'
 import type { Notification } from '../types'
 
@@ -18,17 +18,13 @@ export default function NotificationBell() {
 
   const loadNotifications = async () => {
     try {
-      const [unreadRes, allRes] = await Promise.all([
-        notificationsAPI.getUnread(),
-        notificationsAPI.getAll(20)
-      ])
-
-      if (unreadRes.success) {
-        setUnreadCount(unreadRes.count)
-      }
+      const allRes = await notificationsAPI.getAll(50)
 
       if (allRes.success) {
         setNotifications(allRes.data)
+        // Calculate unread count directly from the data for consistency
+        const actualUnread = allRes.data.filter(n => !n.read_status).length
+        setUnreadCount(actualUnread)
       }
     } catch (err) {
       console.error('Error loading notifications:', err)
@@ -50,6 +46,17 @@ export default function NotificationBell() {
       await loadNotifications()
     } catch (err) {
       console.error('Error marking all notifications as read:', err)
+    }
+  }
+
+  const handleClearAll = async () => {
+    if (window.confirm('Are you sure you want to clear all notifications?')) {
+      try {
+        await notificationsAPI.clearAll()
+        await loadNotifications()
+      } catch (err) {
+        console.error('Error clearing notifications:', err)
+      }
     }
   }
 
@@ -104,7 +111,10 @@ export default function NotificationBell() {
     <>
       {/* Bell Icon */}
       <button
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={() => {
+          if (!isOpen) loadNotifications()
+          setIsOpen(!isOpen)
+        }}
         className="relative p-2 hover:bg-white/10 rounded-lg transition-colors"
       >
         <Bell className="w-6 h-6 text-white/80" />
@@ -125,7 +135,7 @@ export default function NotificationBell() {
           />
 
           {/* Drawer */}
-          <div className="fixed top-0 right-0 h-full w-full max-w-md bg-[#0a0e27] border-l border-white/10 z-50 shadow-2xl animate-slide-in-right overflow-hidden flex flex-col">
+          <div className="fixed top-0 right-0 h-screen w-full max-w-md bg-[#0a0e27] border-l border-white/10 z-50 shadow-2xl animate-slide-in-right flex flex-col">
             {/* Header */}
             <div className="flex items-center justify-between p-4 border-b border-white/10">
               <h2 className="text-xl font-bold text-white flex items-center">
@@ -169,15 +179,26 @@ export default function NotificationBell() {
                   All
                 </button>
               </div>
-              {unreadCount > 0 && (
-                <button
-                  onClick={handleMarkAllRead}
-                  className="flex items-center space-x-1 px-3 py-1 bg-white/5 hover:bg-white/10 rounded-lg text-sm text-white/80 transition-colors"
-                >
-                  <CheckCheck className="w-4 h-4" />
-                  <span>Mark all read</span>
-                </button>
-              )}
+              <div className="flex items-center space-x-2">
+                {unreadCount > 0 && (
+                  <button
+                    onClick={handleMarkAllRead}
+                    className="flex items-center space-x-1 px-3 py-1 bg-white/5 hover:bg-white/10 rounded-lg text-sm text-white/80 transition-colors"
+                  >
+                    <CheckCheck className="w-4 h-4" />
+                    <span>Read all</span>
+                  </button>
+                )}
+                {notifications.length > 0 && (
+                  <button
+                    onClick={handleClearAll}
+                    className="flex items-center space-x-1 px-3 py-1 bg-red-500/10 hover:bg-red-500/20 rounded-lg text-sm text-red-400 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>Clear</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Notifications List */}

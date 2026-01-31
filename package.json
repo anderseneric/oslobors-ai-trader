@@ -33,7 +33,7 @@
     "node-cron": "^3.0.3",
     "puppeteer": "^24.34.0",
     "sqlite3": "^5.1.7",
-    "yahoo-finance2": "^2.4.3"
+    "yahoo-finance2": "^3.11.2"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

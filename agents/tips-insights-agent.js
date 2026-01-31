@@ -7,10 +7,9 @@ import { promisify } from 'util';
 import sqlite3 from 'sqlite3';
 import dotenv from 'dotenv';
 
-dotenv.config();
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+dotenv.config({ path: join(__dirname, '../.env'), override: true });
 
 const dbPath = process.env.DATABASE_PATH || join(__dirname, '../database/trading.db');
 

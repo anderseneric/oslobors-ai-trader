@@ -1,18 +1,27 @@
+// Load environment variables FIRST before any other imports
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+dotenv.config({ path: join(__dirname, '../.env'), override: true });
+
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import yahooFinance from 'yahoo-finance2';
 import Anthropic from '@anthropic-ai/sdk';
 import cron from 'node-cron';
 import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
 import { getTopMovers } from './services/top-movers.js';
 import { analyzeBatchSentiment } from './services/sentiment-analyzer.js';
 import { scrapeNewsweb } from '../mcp-servers/news-scraper/scraper.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import * as priceService from './services/price-service.js';
+import * as finnhub from './services/finnhub-client.js';
+import * as insiderParser from './services/insider-parser.js';
+import * as insiderScoring from './services/insider-scoring.js';
+import * as newswebScraper from './services/newsweb-scraper.js';
+import { startAllAgents } from '../agents/index.js';
 
 // Load Oslo Børs tickers
 const tickersData = JSON.parse(
@@ -46,18 +55,29 @@ import db, {
   calculateSharpeRatio,
   getCachedAnalytics,
   saveAnalyticsCache,
+  saveTradeHistory,
   saveNotification,
   getUnreadNotifications,
   getAllNotifications,
   markNotificationRead,
   markAllNotificationsRead,
+  clearAllNotifications,
   getNotificationPreferences,
   saveNotificationPreference,
   updateNotificationPreference,
-  deleteNotificationPreference
+  deleteNotificationPreference,
+  saveInsiderTransaction,
+  getInsiderTransactions,
+  getInsiderSummary,
+  getTopInsiderBuys,
+  getWatchlists,
+  createWatchlist,
+  deleteWatchlist,
+  getWatchlistItems,
+  addWatchlistItem,
+  updateWatchlistItem,
+  deleteWatchlistItem
 } from './database.js';
-
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -92,6 +112,7 @@ app.post('/api/portfolio', async (req, res) => {
   try {
     const { ticker, shares, avg_buy_price, purchase_date, notes, transaction_fees } = req.body;
 
+    // Validate required fields
     if (!ticker || !shares || !avg_buy_price || !purchase_date) {
       return res.status(400).json({
         success: false,
@@ -99,19 +120,73 @@ app.post('/api/portfolio', async (req, res) => {
       });
     }
 
-    // Fetch current price and company name
-    const tickerSymbol = `${ticker}.OL`;
-    const quote = await yahooFinance.quote(tickerSymbol);
+    // Input validation
+    const sharesNum = parseInt(shares);
+    const priceNum = parseFloat(avg_buy_price);
+    const feesNum = transaction_fees ? parseFloat(transaction_fees) : 0;
+
+    if (!ticker || typeof ticker !== 'string' || ticker.trim().length === 0) {
+      return res.status(400).json({ success: false, error: 'Invalid ticker: must be a non-empty string' });
+    }
+
+    if (isNaN(sharesNum) || sharesNum <= 0 || !Number.isInteger(sharesNum)) {
+      return res.status(400).json({ success: false, error: 'Invalid shares: must be a positive integer' });
+    }
+
+    if (isNaN(priceNum) || priceNum <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid avg_buy_price: must be a positive number' });
+    }
+
+    if (isNaN(feesNum) || feesNum < 0) {
+      return res.status(400).json({ success: false, error: 'Invalid transaction_fees: must be a non-negative number' });
+    }
+
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(purchase_date) || isNaN(Date.parse(purchase_date))) {
+      return res.status(400).json({ success: false, error: 'Invalid purchase_date: must be in YYYY-MM-DD format' });
+    }
+
+    // Fetch current price using new price service (Finnhub primary, Yahoo fallback)
+    const quote = await priceService.getStockQuote(ticker);
+
+    // Get company name (fallback to ticker if not available)
+    let companyName = ticker;
+    if (finnhub.isFinnhubConfigured()) {
+      try {
+        const profile = await finnhub.getCompanyProfile(`${ticker}.OL`);
+        companyName = profile.name || ticker;
+      } catch (error) {
+        console.log(`Could not fetch company name for ${ticker}, using ticker`);
+      }
+    }
+
+    const tickerUpper = ticker.toUpperCase();
+    const sharesInt = parseInt(shares);
+    const buyPrice = parseFloat(avg_buy_price);
+    const fees = transaction_fees ? parseFloat(transaction_fees) : 0;
 
     const result = await addToPortfolio({
-      ticker: ticker.toUpperCase(),
-      company_name: quote.longName || quote.shortName || ticker,
-      shares: parseInt(shares),
-      avg_buy_price: parseFloat(avg_buy_price),
-      current_price: quote.regularMarketPrice,
+      ticker: tickerUpper,
+      company_name: companyName,
+      shares: sharesInt,
+      avg_buy_price: buyPrice,
+      current_price: quote.price,
       purchase_date,
       notes: notes || null,
-      transaction_fees: transaction_fees ? parseFloat(transaction_fees) : 0
+      transaction_fees: fees
+    });
+
+    // Log BUY trade to trade_history for analytics
+    await saveTradeHistory({
+      ticker: tickerUpper,
+      action: 'BUY',
+      shares: sharesInt,
+      price: buyPrice,
+      fees: fees,
+      total_value: sharesInt * buyPrice,
+      trade_date: purchase_date,
+      notes: notes || null
     });
 
     res.json({ success: true, data: { id: result.lastInsertRowid } });
@@ -124,6 +199,36 @@ app.post('/api/portfolio', async (req, res) => {
 app.delete('/api/portfolio/:id', async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Fetch position before deleting to log SELL trade
+    const portfolio = await getPortfolio();
+    const position = portfolio.find(p => p.id === parseInt(id));
+
+    if (!position) {
+      return res.status(404).json({ success: false, error: 'Position not found' });
+    }
+
+    // Get current price for the SELL trade
+    let sellPrice = position.current_price;
+    try {
+      const quote = await priceService.getStockQuote(position.ticker);
+      sellPrice = quote.price || position.current_price;
+    } catch (priceError) {
+      console.log(`Could not fetch current price for ${position.ticker}, using last known price`);
+    }
+
+    // Log SELL trade to trade_history for analytics
+    await saveTradeHistory({
+      ticker: position.ticker,
+      action: 'SELL',
+      shares: position.shares,
+      price: sellPrice,
+      fees: 0, // Could add sell fees if needed
+      total_value: position.shares * sellPrice,
+      trade_date: new Date().toISOString().split('T')[0],
+      notes: `Closed position (bought at ${position.avg_buy_price})`
+    });
+
     await deleteFromPortfolio(id);
     res.json({ success: true });
   } catch (error) {
@@ -138,24 +243,31 @@ app.post('/api/portfolio/refresh-prices', async (req, res) => {
     const updates = [];
     const errors = [];
 
-    for (const position of portfolio) {
-      try {
-        const tickerSymbol = `${position.ticker}.OL`;
-        const quote = await yahooFinance.quote(tickerSymbol);
+    // Use batch quotes for efficiency
+    const tickers = portfolio.map(p => p.ticker);
+    const { quotes, errors: quoteErrors } = await priceService.getBatchQuotes(tickers);
 
-        if (quote.regularMarketPrice) {
-          await updatePortfolioPrice(position.ticker, quote.regularMarketPrice);
+    // Update prices from successful quotes
+    for (const quote of quotes) {
+      try {
+        const position = portfolio.find(p => p.ticker === quote.ticker);
+        if (position && quote.price) {
+          await updatePortfolioPrice(quote.ticker, quote.price);
           updates.push({
-            ticker: position.ticker,
-            price: quote.regularMarketPrice,
-            previousPrice: position.current_price
+            ticker: quote.ticker,
+            price: quote.price,
+            previousPrice: position.current_price,
+            source: quote.source
           });
         }
       } catch (error) {
-        console.error(`Error updating ${position.ticker}:`, error.message);
-        errors.push({ ticker: position.ticker, error: error.message });
+        console.error(`Error updating ${quote.ticker}:`, error.message);
+        errors.push({ ticker: quote.ticker, error: error.message });
       }
     }
+
+    // Add quote errors to error list
+    errors.push(...quoteErrors);
 
     const updatedPortfolio = await getPortfolio();
     const lastUpdate = updatedPortfolio.length > 0
@@ -205,28 +317,165 @@ app.post('/api/portfolio/snapshot', async (req, res) => {
   }
 });
 
+// Watchlist Routes
+
+app.get('/api/watchlists', async (req, res) => {
+  try {
+    const watchlists = await getWatchlists();
+    res.json({ success: true, data: watchlists });
+  } catch (error) {
+    console.error('Error fetching watchlists:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/watchlists', async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name) {
+      return res.status(400).json({ success: false, error: 'Name is required' });
+    }
+    const result = await createWatchlist(name);
+    res.json({ success: true, data: { id: result.lastInsertRowid } });
+  } catch (error) {
+    console.error('Error creating watchlist:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/watchlists/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await deleteWatchlist(id);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting watchlist:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/watchlists/:id/items', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const items = await getWatchlistItems(id);
+
+    // Fetch current prices for all items
+    const tickers = items.map(item => item.ticker);
+    const { quotes } = await priceService.getBatchQuotes(tickers);
+
+    // Merge price data with watchlist items
+    const itemsWithPrices = items.map(item => {
+      const quote = quotes.find(q => q.ticker === item.ticker);
+      return {
+        ...item,
+        current_price: quote?.price || null,
+        change: quote?.change || null,
+        changePercent: quote?.changePercent || null,
+        volume: quote?.volume || null,
+        source: quote?.source || null
+      };
+    });
+
+    res.json({ success: true, data: itemsWithPrices });
+  } catch (error) {
+    console.error('Error fetching watchlist items:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/watchlists/:id/items', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { ticker, notes, target_entry, alert_price } = req.body;
+
+    if (!ticker) {
+      return res.status(400).json({ success: false, error: 'Ticker is required' });
+    }
+
+    // Get company name
+    let companyName = ticker;
+    if (finnhub.isFinnhubConfigured()) {
+      try {
+        const profile = await finnhub.getCompanyProfile(`${ticker}.OL`);
+        companyName = profile.name || ticker;
+      } catch (error) {
+        console.log(`Could not fetch company name for ${ticker}, using ticker`);
+      }
+    }
+
+    const result = await addWatchlistItem(
+      id,
+      ticker.toUpperCase(),
+      companyName,
+      notes || null,
+      target_entry ? parseFloat(target_entry) : null,
+      alert_price ? parseFloat(alert_price) : null
+    );
+
+    res.json({ success: true, data: { id: result.lastInsertRowid } });
+  } catch (error) {
+    console.error('Error adding watchlist item:', error);
+    if (error.message === 'Stock already in watchlist') {
+      res.status(409).json({ success: false, error: error.message });
+    } else {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+});
+
+app.put('/api/watchlists/:watchlistId/items/:ticker', async (req, res) => {
+  try {
+    const { watchlistId, ticker } = req.params;
+    const { notes, target_entry, alert_price } = req.body;
+
+    await updateWatchlistItem(watchlistId, ticker, {
+      notes,
+      target_entry: target_entry ? parseFloat(target_entry) : null,
+      alert_price: alert_price ? parseFloat(alert_price) : null
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating watchlist item:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/watchlists/:watchlistId/items/:ticker', async (req, res) => {
+  try {
+    const { watchlistId, ticker } = req.params;
+    await deleteWatchlistItem(watchlistId, ticker);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting watchlist item:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Stock Routes
 
 app.get('/api/stocks/:ticker', async (req, res) => {
   try {
     const { ticker } = req.params;
-    const tickerSymbol = `${ticker.toUpperCase()}.OL`;
+    const tickerUpper = ticker.toUpperCase();
 
-    const quote = await yahooFinance.quote(tickerSymbol);
+    // Use price-service (Finnhub primary, Yahoo fallback)
+    const quote = await priceService.getStockQuote(tickerUpper);
 
     res.json({
       success: true,
       data: {
-        ticker: ticker.toUpperCase(),
-        name: quote.longName || quote.shortName,
-        price: quote.regularMarketPrice,
-        change: quote.regularMarketChange,
-        changePercent: quote.regularMarketChangePercent,
-        volume: quote.regularMarketVolume,
-        marketCap: quote.marketCap,
-        fiftyTwoWeekHigh: quote.fiftyTwoWeekHigh,
-        fiftyTwoWeekLow: quote.fiftyTwoWeekLow,
-        currency: quote.currency
+        ticker: tickerUpper,
+        name: quote.name || tickerUpper, // Name may not be available from Finnhub
+        price: quote.price,
+        change: quote.change,
+        changePercent: quote.changePercent,
+        volume: quote.volume, // May be null from Finnhub - that's OK
+        marketCap: quote.marketCap || null, // Not available from Finnhub
+        fiftyTwoWeekHigh: quote.fiftyTwoWeekHigh || null,
+        fiftyTwoWeekLow: quote.fiftyTwoWeekLow || null,
+        currency: 'NOK',
+        source: quote.source // 'finnhub' or 'yahoo'
       }
     });
   } catch (error) {
@@ -235,40 +484,76 @@ app.get('/api/stocks/:ticker', async (req, res) => {
   }
 });
 
+// Rate limiting for historical data (Yahoo Finance)
+let lastHistoricalFetch = 0;
+const HISTORICAL_MIN_DELAY = 3000; // 3 seconds between historical fetches
+
 app.get('/api/stocks/:ticker/history', async (req, res) => {
   try {
     const { ticker } = req.params;
     const { days = 90 } = req.query;
+    const tickerUpper = ticker.toUpperCase();
 
     // Check if we have cached data
-    let history = await getPriceHistory(ticker.toUpperCase(), parseInt(days));
+    let history = await getPriceHistory(tickerUpper, parseInt(days));
 
-    // If no cached data or data is old, fetch from Yahoo Finance
-    if (history.length === 0) {
-      const tickerSymbol = `${ticker.toUpperCase()}.OL`;
+    // Check if data is stale (last entry is older than 1 day on a weekday)
+    const isStale = () => {
+      if (history.length === 0) return true;
+      const lastDate = new Date(history[0].date); // Most recent entry
+      const now = new Date();
+      const daysDiff = Math.floor((now - lastDate) / (1000 * 60 * 60 * 24));
+      // Consider stale if more than 1 day old (accounting for weekends)
+      return daysDiff > 3; // Allow weekend gap + 1 day buffer
+    };
+
+    // Only fetch if no data or data is stale
+    if (history.length === 0 || isStale()) {
+      // Rate limit: wait between Yahoo historical calls
+      const now = Date.now();
+      const timeSinceLastFetch = now - lastHistoricalFetch;
+      if (timeSinceLastFetch < HISTORICAL_MIN_DELAY) {
+        // If we have stale data, return it rather than waiting
+        if (history.length > 0) {
+          return res.json({ success: true, data: history, stale: true });
+        }
+        await new Promise(resolve => setTimeout(resolve, HISTORICAL_MIN_DELAY - timeSinceLastFetch));
+      }
+      lastHistoricalFetch = Date.now();
+
+      const tickerSymbol = `${tickerUpper}.OL`;
       const endDate = new Date();
       const startDate = new Date();
       startDate.setDate(startDate.getDate() - parseInt(days));
 
-      const result = await yahooFinance.historical(tickerSymbol, {
-        period1: startDate,
-        period2: endDate,
-      });
-
-      // Save to database
-      for (const item of result) {
-        await savePriceHistory({
-          ticker: ticker.toUpperCase(),
-          date: item.date.toISOString().split('T')[0],
-          open: item.open,
-          high: item.high,
-          low: item.low,
-          close: item.close,
-          volume: item.volume
+      try {
+        const result = await yahooFinance.historical(tickerSymbol, {
+          period1: startDate,
+          period2: endDate,
         });
-      }
 
-      history = await getPriceHistory(ticker.toUpperCase(), parseInt(days));
+        // Save to database
+        for (const item of result) {
+          await savePriceHistory({
+            ticker: tickerUpper,
+            date: item.date.toISOString().split('T')[0],
+            open: item.open,
+            high: item.high,
+            low: item.low,
+            close: item.close,
+            volume: item.volume
+          });
+        }
+
+        history = await getPriceHistory(tickerUpper, parseInt(days));
+      } catch (yahooError) {
+        // If Yahoo fails and we have stale data, return that
+        if (history.length > 0) {
+          console.log(`Yahoo historical failed for ${tickerUpper}, returning cached data`);
+          return res.json({ success: true, data: history, stale: true });
+        }
+        throw yahooError;
+      }
     }
 
     res.json({ success: true, data: history });
@@ -293,9 +578,8 @@ app.get('/api/stocks/:ticker/analysis', async (req, res) => {
       });
     }
 
-    // Fetch fresh data for analysis
-    const tickerSymbol = `${tickerUpper}.OL`;
-    const quote = await yahooFinance.quote(tickerSymbol);
+    // Fetch fresh data for analysis using price-service (Finnhub primary, Yahoo fallback)
+    const quote = await priceService.getStockQuote(tickerUpper);
 
     // Get recent news
     const recentNews = await getNews(tickerUpper, 10);
@@ -303,12 +587,18 @@ app.get('/api/stocks/:ticker/analysis', async (req, res) => {
     // Prepare context for Claude
     const newsContext = recentNews.map(n => `- ${n.title} (${n.published_date})`).join('\n');
 
-    const prompt = `Analyze ${tickerUpper} (${quote.longName}) stock for swing trading.
+    // Build price info string (handle missing fields gracefully)
+    const volumeStr = quote.volume ? `Volume: ${quote.volume}` : 'Volume: N/A';
+    const rangeStr = (quote.fiftyTwoWeekLow && quote.fiftyTwoWeekHigh)
+      ? `52W Range: ${quote.fiftyTwoWeekLow} - ${quote.fiftyTwoWeekHigh}`
+      : '52W Range: N/A';
 
-Current Price: ${quote.regularMarketPrice} ${quote.currency}
-Change: ${quote.regularMarketChangePercent?.toFixed(2)}%
-52W Range: ${quote.fiftyTwoWeekLow} - ${quote.fiftyTwoWeekHigh}
-Volume: ${quote.regularMarketVolume}
+    const prompt = `Analyze ${tickerUpper} stock for swing trading.
+
+Current Price: ${quote.price} NOK
+Change: ${quote.changePercent?.toFixed(2)}%
+${rangeStr}
+${volumeStr}
 
 Recent News:
 ${newsContext || 'No recent news available'}
@@ -506,6 +796,160 @@ app.post('/api/news/refresh', async (req, res) => {
   }
 });
 
+// Insider Trading
+
+app.get('/api/insider/transactions', async (req, res) => {
+  try {
+    const { ticker, days = 90 } = req.query;
+    const transactions = await getInsiderTransactions(
+      ticker?.toUpperCase(),
+      parseInt(days)
+    );
+
+    res.json({
+      success: true,
+      data: transactions,
+      count: transactions.length
+    });
+  } catch (error) {
+    console.error('Error fetching insider transactions:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/insider/summary/:ticker', async (req, res) => {
+  try {
+    const { ticker } = req.params;
+    const { days = 30 } = req.query;
+
+    const summary = await getInsiderSummary(ticker.toUpperCase(), parseInt(days));
+    const scoreData = await insiderScoring.calculateInsiderScore(ticker.toUpperCase(), parseInt(days));
+    const recentTransactions = await getInsiderTransactions(ticker.toUpperCase(), parseInt(days));
+
+    res.json({
+      success: true,
+      ticker: ticker.toUpperCase(),
+      days: parseInt(days),
+      summary,
+      score: scoreData.score,
+      signal: insiderScoring.getInsiderSignal(scoreData.score),
+      scoreDetails: {
+        seniorBuys: scoreData.seniorBuys,
+        largeBuys: scoreData.largeBuys,
+        recentBuys: scoreData.recentBuys
+      },
+      recentTransactions: recentTransactions.slice(0, 10)
+    });
+  } catch (error) {
+    console.error(`Error fetching insider summary for ${req.params.ticker}:`, error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/insider/top-buys', async (req, res) => {
+  try {
+    const { days = 7, limit = 10 } = req.query;
+
+    const opportunities = await insiderScoring.getTopInsiderOpportunities(
+      parseInt(days),
+      parseInt(limit)
+    );
+
+    res.json({
+      success: true,
+      data: opportunities,
+      count: opportunities.length,
+      period: `Last ${days} days`
+    });
+  } catch (error) {
+    console.error('Error fetching top insider buys:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Parse insider transactions from news (automatic background job)
+app.post('/api/insider/parse-from-news', async (req, res) => {
+  try {
+    console.log('[Insider Parser] Starting parse from news with Puppeteer scraping...');
+
+    // Get recent news (last 30 days to catch all insider transactions)
+    const recentNews = await getLatestNews(720); // Last 30 days
+
+    // Filter for insider-related news first (to avoid unnecessary scraping)
+    const insiderNews = recentNews.filter(news => insiderParser.isInsiderTransaction(news));
+    console.log(`[Insider Parser] Found ${insiderNews.length} insider-related news items`);
+
+    if (insiderNews.length === 0) {
+      return res.json({
+        success: true,
+        parsed: 0,
+        saved: 0,
+        skipped: 0,
+        message: 'No insider-related news found'
+      });
+    }
+
+    // Scrape full content from Newsweb for each insider news item
+    console.log(`[Insider Parser] Scraping content from ${insiderNews.length} Newsweb articles...`);
+    const transactions = [];
+
+    for (const newsItem of insiderNews) {
+      try {
+        // Scrape full content if we have a link
+        if (newsItem.link) {
+          console.log(`[Insider Parser] Scraping ${newsItem.ticker}: ${newsItem.link}`);
+          const scrapedContent = await newswebScraper.scrapeNewswebArticle(newsItem.link);
+
+          if (scrapedContent) {
+            // Create enriched news item with scraped content
+            const enrichedNews = {
+              ...newsItem,
+              content: scrapedContent
+            };
+
+            // Parse the transaction with full content
+            const transaction = insiderParser.parseInsiderTransaction(enrichedNews);
+            if (transaction) {
+              transactions.push(transaction);
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`[Insider Parser] Error processing ${newsItem.ticker}:`, error.message);
+      }
+    }
+
+    console.log(`[Insider Parser] Parsed ${transactions.length} insider transactions from scraped content`);
+
+    // Save to database
+    let savedCount = 0;
+    for (const transaction of transactions) {
+      try {
+        const result = await saveInsiderTransaction(transaction);
+        if (result.changes > 0) savedCount++;
+      } catch (error) {
+        console.error('[Insider Parser] Error saving transaction:', error.message);
+      }
+    }
+
+    console.log(`[Insider Parser] ✓ Saved ${savedCount} new insider transactions`);
+
+    // Close browser to free resources
+    await newswebScraper.closeBrowser();
+
+    res.json({
+      success: true,
+      parsed: transactions.length,
+      saved: savedCount,
+      skipped: transactions.length - savedCount
+    });
+  } catch (error) {
+    console.error('[Insider Parser] Error:', error);
+    await newswebScraper.closeBrowser();
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Recommendations
 
 app.get('/api/recommendations', async (req, res) => {
@@ -531,11 +975,24 @@ app.get('/api/recommendations', async (req, res) => {
 
     console.log(`📊 Analyzing Oslo Børs stocks (excluding ${portfolioTickers.size} portfolio holdings)...`);
 
-    // Start with ALL Oslo Børs tickers
-    const allTickers = tickersData.tickers || [];
+    // Use major liquid Oslo Børs tickers to avoid rate limiting
+    const majorTickers = [
+      'EQNR', 'MOWI', 'DNB', 'TEL', 'YAR', 'VAR', 'ORK', 'SALM', 'NHY',
+      'AKSO', 'BAKKA', 'SUBC', 'XXL', 'KOG', 'AUTOSTR', 'SCATC', 'KAHOT',
+      'NONG', 'TGS', 'AUSS', 'BORR', 'RECSI', 'ADEVNT', 'SDSD', 'AFG',
+      'MPCC', 'FLNG', 'GOGL', 'PARB', 'HAFNI', 'AKRBP', 'PGS', 'SHLF',
+      'WWI', 'REACH', 'NSKOG', 'GJF', 'STB', 'BOUV', 'MULTI'
+    ];
+
+    // Get full ticker objects for the major tickers
+    const allTickersData = tickersData.tickers || [];
+    const allTickers = allTickersData.filter(t => majorTickers.includes(t.symbol));
+
+    console.log(`🔍 Screening ${allTickers.length} major liquid stocks...`);
 
     // Filter candidates
     const candidates = [];
+    let rateLimitErrors = 0;
 
     for (const tickerObj of allTickers) {
       const ticker = tickerObj.symbol;
@@ -546,18 +1003,21 @@ app.get('/api/recommendations', async (req, res) => {
       }
 
       try {
-        const tickerSymbol = `${ticker}.OL`;
-        const quote = await yahooFinance.quote(tickerSymbol);
+        const quote = await priceService.getStockQuote(ticker);
+
+        // Debug: log what we got
+        console.log(`  ${ticker}: price=${quote.price}, vol=${quote.volume || 'N/A'}, source=${quote.source}`);
 
         // Filter by price range (5-1000 NOK)
-        if (!quote.regularMarketPrice ||
-            quote.regularMarketPrice < 5 ||
-            quote.regularMarketPrice > 1000) {
+        if (!quote.price || quote.price < 5 || quote.price > 1000) {
+          console.log(`    ✗ Filtered out: price out of range`);
           continue;
         }
 
-        // Filter by volume (> 100,000 shares/day)
-        if (!quote.regularMarketVolume || quote.regularMarketVolume < 100000) {
+        // Volume filtering (more lenient if from Finnhub which doesn't always have volume)
+        const minVolume = quote.source === 'finnhub' ? 1000 : 10000;
+        if (quote.volume && quote.volume < minVolume) {
+          console.log(`    ✗ Filtered out: volume too low`);
           continue;
         }
 
@@ -565,32 +1025,186 @@ app.get('/api/recommendations', async (req, res) => {
         const recentNews = await getNews(ticker, 5);
         const newsCount = recentNews.length;
 
-        // Calculate volume spike (use current volume vs 3-month avg if available)
-        const volumeSpike = quote.averageVolume && quote.averageVolume > 0
-          ? quote.regularMarketVolume / quote.averageVolume
+        // Calculate volume spike if volume data available
+        const volumeSpike = quote.averageVolume && quote.volume && quote.averageVolume > 0
+          ? quote.volume / quote.averageVolume
           : 1;
+
+        // Get insider activity score (last 30 days)
+        let insiderScore = 0;
+        let insiderSignal = null;
+        try {
+          const insiderData = await insiderScoring.calculateInsiderScore(ticker, 30);
+          insiderScore = insiderData.score || 0;
+          insiderSignal = insiderScoring.getInsiderSignal(insiderScore);
+        } catch (error) {
+          // No insider data available
+        }
 
         candidates.push({
           ticker,
           name: tickerObj.name,
           sector: tickerObj.sector,
-          price: quote.regularMarketPrice,
-          volume: quote.regularMarketVolume,
+          price: quote.price,
+          volume: quote.volume,
           volumeSpike,
           newsCount,
           quote,
           recentNews,
-          // Scoring: prioritize volume spikes and recent news
-          score: (volumeSpike * 10) + (newsCount * 5) + Math.random()
+          insiderScore,
+          insiderSignal,
+          // Scoring: prioritize volume spikes, recent news, and insider activity
+          score: (volumeSpike * 10) + (newsCount * 5) + (insiderScore * 0.5) + Math.random()
         });
 
       } catch (error) {
+        // Track rate limit errors
+        if (error.message.includes('Too Many Requests')) {
+          rateLimitErrors++;
+        }
         // Skip stocks with errors (delisted, suspended, etc.)
+        console.log(`  ${ticker}: ✗ Error - ${error.message}`);
         continue;
       }
     }
 
-    console.log(`✓ Found ${candidates.length} eligible candidates`);
+    console.log(`✓ Found ${candidates.length} eligible candidates (${rateLimitErrors} rate limit errors)`);
+
+    // If we got mostly rate limit errors, use news-based fallback
+    if (candidates.length === 0 && rateLimitErrors > allTickers.length * 0.5) {
+      console.log(`⚠️  Yahoo Finance rate limited. Using news-based recommendations...`);
+
+      const recommendations = [];
+
+      // Get tickers with most recent news
+      const newsBasedCandidates = await new Promise((resolve, reject) => {
+        db.all(`
+          SELECT ticker, COUNT(*) as news_count, MAX(published_date) as latest_news
+          FROM news
+          WHERE ticker IN (${majorTickers.map(t => `'${t}'`).join(',')})
+            AND ticker NOT IN (${Array.from(portfolioTickers).map(t => `'${t}'`).join(',') || "''"})
+            AND published_date >= datetime('now', '-7 days')
+          GROUP BY ticker
+          HAVING news_count >= 2
+          ORDER BY news_count DESC, latest_news DESC
+          LIMIT 10
+        `, [], (err, rows) => {
+          if (err) reject(err);
+          else resolve(rows || []);
+        });
+      });
+
+      console.log(`📰 Found ${newsBasedCandidates.length} stocks with recent news activity`);
+
+      if (newsBasedCandidates.length === 0) {
+        return res.json({
+          success: true,
+          data: [],
+          message: 'Yahoo Finance is temporarily unavailable. No recent news activity to base recommendations on.'
+        });
+      }
+
+      // Generate recommendations based on news sentiment
+      for (const candidate of newsBasedCandidates) {
+        const tickerObj = allTickersData.find(t => t.symbol === candidate.ticker);
+        if (!tickerObj) continue;
+
+        const recentNews = await getNews(candidate.ticker, 5);
+        const newsContext = recentNews
+          .map(n => `- ${n.title} (${n.published_date}, sentiment: ${n.sentiment || 'neutral'})`)
+          .join('\n');
+
+        // Get insider activity score
+        let insiderScore = 0;
+        let insiderSignal = null;
+        try {
+          const insiderData = await insiderScoring.calculateInsiderScore(candidate.ticker, 30);
+          insiderScore = insiderData.score || 0;
+          insiderSignal = insiderScoring.getInsiderSignal(insiderScore);
+        } catch (error) {
+          // No insider data available
+        }
+
+        const insiderContext = insiderScore > 0
+          ? `\nInsider Activity (Last 30 days):
+Signal: ${insiderSignal}
+Score: ${insiderScore}/100
+${insiderScore >= 65 ? '⚠️ STRONG INSIDER BUYING - Very bullish!' : insiderScore >= 50 ? '✓ Moderate insider buying' : 'Some insider activity'}`
+          : '';
+
+        // Simplified prompt for news-only analysis
+        const prompt = `You are a professional swing trader analyzing Norwegian stocks (Oslo Børs).
+
+Stock: ${candidate.ticker} (${tickerObj.name})
+Sector: ${tickerObj.sector || 'Unknown'}
+
+Recent News Activity (${candidate.news_count} articles in last 7 days):
+${newsContext}${insiderContext}
+
+Note: Market data temporarily unavailable. Base your analysis on news sentiment, company developments, and insider activity.
+
+Provide a swing trade recommendation in JSON format:
+{
+  "recommendation": "STRONG_BUY" | "BUY" | "HOLD" | "SELL" | "AVOID",
+  "confidence": 0-100,
+  "reasoning": [
+    "Point 1",
+    "Point 2",
+    "Point 3"
+  ]
+}
+
+Only recommend if confidence > 50. Focus on news-driven catalysts.`;
+
+        try {
+          const message = await anthropic.messages.create({
+            model: process.env.CLAUDE_MODEL || 'claude-3-5-sonnet-20241022',
+            max_tokens: 1024,
+            messages: [{
+              role: 'user',
+              content: prompt
+            }]
+          });
+
+          const responseText = message.content[0].text;
+          const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+
+          if (jsonMatch) {
+            const analysis = JSON.parse(jsonMatch[0]);
+
+            if (analysis.confidence > 50) {
+              const recommendation = {
+                ticker: candidate.ticker,
+                name: tickerObj.name,
+                sector: tickerObj.sector || 'Unknown',
+                recommendation: analysis.recommendation,
+                confidence: analysis.confidence,
+                reasoning: analysis.reasoning,
+                news_count: candidate.news_count,
+                latest_news: candidate.latest_news,
+                insider_score: insiderScore,
+                insider_signal: insiderSignal
+              };
+
+              // Save to database
+              await saveRecommendation(recommendation);
+              recommendations.push(recommendation);
+            }
+          }
+        } catch (error) {
+          console.error(`Error analyzing ${candidate.ticker}:`, error.message);
+        }
+      }
+
+      console.log(`✅ Generated ${recommendations.length} news-based recommendations`);
+
+      return res.json({
+        success: true,
+        data: recommendations.slice(0, 5),
+        news_based: true,
+        message: `Generated ${recommendations.length} recommendations based on recent news activity (market data temporarily unavailable)`
+      });
+    }
 
     if (candidates.length === 0) {
       return res.json({
@@ -615,6 +1229,14 @@ app.get('/api/recommendations', async (req, res) => {
           .map(n => `- ${n.title} (${n.published_date})`)
           .join('\n');
 
+        // Insider activity context
+        const insiderContext = candidate.insiderScore > 0
+          ? `\nInsider Activity (Last 30 days):
+Signal: ${candidate.insiderSignal}
+Score: ${candidate.insiderScore}/100
+${candidate.insiderScore >= 65 ? '⚠️ STRONG INSIDER BUYING DETECTED - This is a very bullish signal!' : candidate.insiderScore >= 50 ? '✓ Moderate insider buying activity' : candidate.insiderScore > 0 ? 'Some insider activity present' : ''}`
+          : '';
+
         // Claude API prompt
         const prompt = `You are a professional swing trader analyzing Norwegian stocks (Oslo Børs).
 
@@ -624,7 +1246,7 @@ Current Price: ${candidate.price} NOK
 Change: ${candidate.quote.regularMarketChangePercent?.toFixed(2)}%
 52W Range: ${candidate.quote.fiftyTwoWeekLow} - ${candidate.quote.fiftyTwoWeekHigh}
 Volume: ${candidate.volume.toLocaleString()}
-Volume Spike: ${candidate.volumeSpike.toFixed(2)}x average
+Volume Spike: ${candidate.volumeSpike.toFixed(2)}x average${insiderContext}
 
 Recent News:
 ${newsContext || 'No recent news available'}
@@ -668,13 +1290,15 @@ Only recommend if confidence > 50. Focus on actionable swing trades (2-6 month h
             if (recData.confidence > 50) {
               const fullData = {
                 ticker: candidate.ticker,
-                ...recData
+                ...recData,
+                insider_score: candidate.insiderScore,
+                insider_signal: candidate.insiderSignal
               };
 
               // Save to cache
               await saveRecommendation(fullData, 4);
               recommendations.push(fullData);
-              console.log(`  ✓ ${candidate.ticker}: ${recData.recommendation} (${recData.confidence}%)`);
+              console.log(`  ✓ ${candidate.ticker}: ${recData.recommendation} (${recData.confidence}%) ${candidate.insiderScore > 0 ? `[Insider: ${candidate.insiderScore}]` : ''}`);
             } else {
               console.log(`  ✗ ${candidate.ticker}: Low confidence (${recData.confidence}%)`);
             }
@@ -1062,15 +1686,13 @@ app.get('/api/analytics/benchmark', async (req, res) => {
       });
     }
 
-    // Fetch OSEBX benchmark data (Oslo Børs Index)
+    // Fetch OSEBX benchmark data (Oslo Børs Index) - uses 24-hour cache
     try {
-      const firstDate = portfolioHistory[0].date;
-      const lastDate = portfolioHistory[portfolioHistory.length - 1].date;
+      const { data: osebxData, cached: benchmarkCached } = await priceService.getBenchmarkHistory('^OSEBX', 90);
 
-      const osebxData = await yahooFinance.historical('^OSEBX', {
-        period1: firstDate,
-        period2: lastDate
-      });
+      if (benchmarkCached) {
+        console.log('[Benchmark] Using cached OSEBX data');
+      }
 
       // Normalize both to percentage change from start
       const portfolioStart = portfolioHistory[0].value;
@@ -1203,6 +1825,20 @@ app.post('/api/notifications/mark-all-read', async (req, res) => {
   }
 });
 
+app.delete('/api/notifications/clear', async (req, res) => {
+  try {
+    const result = await clearAllNotifications();
+
+    res.json({
+      success: true,
+      message: `Cleared ${result.changes} notifications`
+    });
+  } catch (error) {
+    console.error('Error clearing notifications:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.get('/api/notifications/preferences', async (req, res) => {
   try {
     const preferences = await getNotificationPreferences();
@@ -1279,6 +1915,27 @@ app.delete('/api/notifications/preferences/:id', async (req, res) => {
   }
 });
 
+// Data source status endpoint
+app.get('/api/status', async (req, res) => {
+  try {
+    const status = priceService.getDataSourceStatus();
+
+    // Test Finnhub connection if configured
+    if (finnhub.isFinnhubConfigured()) {
+      status.finnhub.tested = await finnhub.testConnection();
+    }
+
+    res.json({
+      success: true,
+      dataSources: status,
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
@@ -1290,10 +1947,24 @@ app.use((err, req, res, next) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   console.log(`📊 Database: ${process.env.DATABASE_PATH || './database/trading.db'}`);
   console.log(`🤖 Claude Model: ${process.env.CLAUDE_MODEL || 'claude-3-5-sonnet-20241022'}`);
+
+  // Test Finnhub connection on startup
+  if (finnhub.isFinnhubConfigured()) {
+    console.log(`📈 Testing Finnhub connection...`);
+    const finnhubWorking = await finnhub.testConnection();
+    if (finnhubWorking) {
+      console.log(`✓ Finnhub API ready (primary data source)`);
+    } else {
+      console.log(`⚠️  Finnhub connection failed, will use Yahoo Finance as fallback`);
+    }
+  } else {
+    console.log(`⚠️  Finnhub not configured, using Yahoo Finance only`);
+    console.log(`   Add FINNHUB_API_KEY to .env to enable Finnhub (recommended)`);
+  }
 });
 
 // Cron Jobs
@@ -1325,5 +1996,18 @@ cron.schedule('0 0 * * 0', async () => {
 console.log('⏰ Cron jobs scheduled:');
 console.log('   - Daily snapshot: 18:30');
 console.log('   - Clean history: Sundays 00:00');
+
+// Auto-start agents with server (controlled by START_AGENTS env variable)
+// Set START_AGENTS=false to disable auto-start
+if (process.env.START_AGENTS !== 'false') {
+  try {
+    startAllAgents();
+  } catch (error) {
+    console.error('⚠️  Failed to start agents:', error.message);
+    console.log('   Server will continue without agents. Run "npm run agents" separately.');
+  }
+} else {
+  console.log('ℹ️  Agents disabled (START_AGENTS=false). Run "npm run agents" separately.');
+}
 
 export default app;

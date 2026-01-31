@@ -87,6 +87,8 @@ export interface Recommendation {
   position_size_percent: number;
   risk_reward_ratio: string;
   reasoning: string[];
+  insider_score?: number;
+  insider_signal?: string;
   created_at?: string;
 }
 
@@ -175,4 +177,58 @@ export interface NotificationPreference {
   threshold_value?: number;
   threshold_type?: 'above' | 'below' | 'change_percent';
   created_at?: string;
+}
+
+export interface InsiderTransaction {
+  id: number;
+  ticker: string;
+  insider_name: string;
+  role?: string;
+  transaction_type: 'BUY' | 'SELL';
+  shares?: number;
+  price?: number;
+  value?: number;
+  transaction_date: string;
+  reported_date: string;
+  source: string;
+  news_link?: string;
+  created_at: string;
+}
+
+export interface InsiderSummary {
+  buy_count: number;
+  sell_count: number;
+  shares_bought: number;
+  shares_sold: number;
+  value_bought: number;
+  value_sold: number;
+  unique_insiders: number;
+  net_shares: number;
+  net_value: number;
+}
+
+export interface InsiderOpportunity {
+  ticker: string;
+  insiderScore: number;
+  signal: 'STRONGLY BULLISH' | 'BULLISH' | 'MODERATELY BULLISH' | 'NEUTRAL' | 'MODERATELY BEARISH' | 'BEARISH';
+  buyCount: number;
+  totalValue: number;
+  insiderCount: number;
+  latestTransaction: string;
+  seniorBuys: number;
+  largeBuys: number;
+  recentBuys: number;
+}
+
+export interface InsiderTickerSummary {
+  ticker: string;
+  summary: InsiderSummary;
+  score: number;
+  signal: string;
+  scoreDetails: {
+    seniorBuys: number;
+    largeBuys: number;
+    recentBuys: number;
+  };
+  recentTransactions: InsiderTransaction[];
 }

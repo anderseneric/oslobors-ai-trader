@@ -123,6 +123,26 @@ const initDatabase = async () => {
       // Column already exists, skip
     }
 
+    // Insider transactions table
+    await dbRun(`
+      CREATE TABLE IF NOT EXISTS insider_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        insider_name TEXT NOT NULL,
+        role TEXT,
+        transaction_type TEXT NOT NULL,
+        shares INTEGER,
+        price REAL,
+        value REAL,
+        transaction_date TEXT NOT NULL,
+        reported_date TEXT NOT NULL,
+        source TEXT DEFAULT 'newsweb',
+        news_link TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(ticker, insider_name, transaction_date, shares)
+      )
+    `);
+
     // Recommendations table
     await dbRun(`
       CREATE TABLE IF NOT EXISTS recommendations (
@@ -233,6 +253,38 @@ const initDatabase = async () => {
       )
     `);
 
+    // Watchlists table
+    await dbRun(`
+      CREATE TABLE IF NOT EXISTS watchlists (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL DEFAULT 'Default',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Watchlist items table
+    await dbRun(`
+      CREATE TABLE IF NOT EXISTS watchlist_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        watchlist_id INTEGER NOT NULL,
+        ticker TEXT NOT NULL,
+        company_name TEXT,
+        added_date TEXT DEFAULT CURRENT_TIMESTAMP,
+        notes TEXT,
+        target_entry REAL,
+        alert_price REAL,
+        FOREIGN KEY (watchlist_id) REFERENCES watchlists(id) ON DELETE CASCADE,
+        UNIQUE(watchlist_id, ticker)
+      )
+    `);
+
+    // Create default watchlist if none exists
+    const existingWatchlists = await dbAll('SELECT COUNT(*) as count FROM watchlists');
+    if (existingWatchlists[0].count === 0) {
+      await dbRun('INSERT INTO watchlists (name) VALUES (?)', ['Default']);
+      console.log('✓ Created default watchlist');
+    }
+
     // Create indexes for better query performance
     await dbRun('CREATE INDEX IF NOT EXISTS idx_portfolio_ticker ON portfolio(ticker)');
     await dbRun('CREATE INDEX IF NOT EXISTS idx_price_history_ticker_date ON price_history(ticker, date)');
@@ -247,6 +299,10 @@ const initDatabase = async () => {
     await dbRun('CREATE INDEX IF NOT EXISTS idx_notification_prefs_type ON notification_preferences(notification_type)');
     await dbRun('CREATE INDEX IF NOT EXISTS idx_notification_history_read ON notification_history(read_status, created_at)');
     await dbRun('CREATE INDEX IF NOT EXISTS idx_notification_history_ticker ON notification_history(ticker)');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_insider_transactions_ticker_date ON insider_transactions(ticker, transaction_date)');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_insider_transactions_type ON insider_transactions(transaction_type)');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_watchlist_items_watchlist_id ON watchlist_items(watchlist_id)');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_watchlist_items_ticker ON watchlist_items(ticker)');
 
     console.log('✓ Database initialized successfully');
   } catch (err) {
@@ -361,6 +417,94 @@ export const getLatestNews = async (hours = 24) => {
      ORDER BY published_date DESC`,
     [since]
   );
+};
+
+// Insider Transactions Functions
+export const saveInsiderTransaction = async (data) => {
+  const result = await dbRun(
+    `INSERT OR IGNORE INTO insider_transactions (
+      ticker, insider_name, role, transaction_type, shares, price, value,
+      transaction_date, reported_date, source, news_link
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      data.ticker, data.insider_name, data.role, data.transaction_type,
+      data.shares, data.price, data.value, data.transaction_date,
+      data.reported_date, data.source || 'newsweb', data.news_link
+    ]
+  );
+  return result;
+};
+
+export const getInsiderTransactions = async (ticker = null, days = 90) => {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+  if (ticker) {
+    return await dbAll(
+      `SELECT * FROM insider_transactions
+       WHERE ticker = ? AND transaction_date >= ?
+       ORDER BY transaction_date DESC`,
+      [ticker, since]
+    );
+  } else {
+    return await dbAll(
+      `SELECT * FROM insider_transactions
+       WHERE transaction_date >= ?
+       ORDER BY transaction_date DESC`,
+      [since]
+    );
+  }
+};
+
+export const getInsiderSummary = async (ticker, days = 30) => {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+  const summary = await dbGet(
+    `SELECT
+      COUNT(CASE WHEN transaction_type = 'BUY' THEN 1 END) as buy_count,
+      COUNT(CASE WHEN transaction_type = 'SELL' THEN 1 END) as sell_count,
+      SUM(CASE WHEN transaction_type = 'BUY' THEN shares ELSE 0 END) as shares_bought,
+      SUM(CASE WHEN transaction_type = 'SELL' THEN shares ELSE 0 END) as shares_sold,
+      SUM(CASE WHEN transaction_type = 'BUY' THEN value ELSE 0 END) as value_bought,
+      SUM(CASE WHEN transaction_type = 'SELL' THEN value ELSE 0 END) as value_sold,
+      COUNT(DISTINCT insider_name) as unique_insiders
+     FROM insider_transactions
+     WHERE ticker = ? AND transaction_date >= ?`,
+    [ticker, since]
+  );
+
+  return {
+    buyCount: summary?.buy_count || 0,
+    sellCount: summary?.sell_count || 0,
+    sharesBought: summary?.shares_bought || 0,
+    sharesSold: summary?.shares_sold || 0,
+    valueBought: summary?.value_bought || 0,
+    valueSold: summary?.value_sold || 0,
+    uniqueInsiders: summary?.unique_insiders || 0,
+    netShares: (summary?.shares_bought || 0) - (summary?.shares_sold || 0),
+    netValue: (summary?.value_bought || 0) - (summary?.value_sold || 0)
+  };
+};
+
+export const getTopInsiderBuys = async (days = 7, limit = 10) => {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+  const results = await dbAll(
+    `SELECT
+      ticker,
+      COUNT(*) as transaction_count,
+      SUM(value) as total_value,
+      SUM(shares) as total_shares,
+      COUNT(DISTINCT insider_name) as insider_count,
+      MAX(transaction_date) as latest_transaction
+     FROM insider_transactions
+     WHERE transaction_type = 'BUY' AND transaction_date >= ?
+     GROUP BY ticker
+     ORDER BY total_value DESC
+     LIMIT ?`,
+    [since, limit]
+  );
+
+  return results;
 };
 
 export const saveRecommendation = async (data, cacheHours = 4) => {
@@ -833,6 +977,21 @@ export const calculateSectorPerformance = async () => {
 // Notifications
 
 export const saveNotification = async (data) => {
+  // Check for duplicate notification (same type + ticker in last hour)
+  const existingNotification = await dbGet(
+    `SELECT id FROM notification_history
+     WHERE notification_type = ?
+     AND (ticker = ? OR (ticker IS NULL AND ? IS NULL))
+     AND created_at > datetime('now', '-1 hour')
+     LIMIT 1`,
+    [data.notification_type, data.ticker || null, data.ticker || null]
+  );
+
+  if (existingNotification) {
+    // Skip duplicate
+    return { lastInsertRowid: null, changes: 0, skipped: true };
+  }
+
   const result = await dbRun(
     `INSERT INTO notification_history (notification_type, ticker, title, message, severity, read_status)
      VALUES (?, ?, ?, ?, ?, 0)`,
@@ -911,4 +1070,82 @@ export const clearOldNotifications = async (daysToKeep = 30) => {
     [cutoffString]
   );
   return { changes: result.changes };
+};
+
+export const clearAllNotifications = async () => {
+  const result = await dbRun('DELETE FROM notification_history');
+  return { changes: result.changes };
+};
+
+// Watchlists
+
+export const getWatchlists = async () => {
+  return await dbAll('SELECT * FROM watchlists ORDER BY created_at ASC');
+};
+
+export const createWatchlist = async (name) => {
+  const result = await dbRun(
+    'INSERT INTO watchlists (name) VALUES (?)',
+    [name]
+  );
+  return { lastInsertRowid: result.lastID, changes: result.changes };
+};
+
+export const deleteWatchlist = async (id) => {
+  const result = await dbRun('DELETE FROM watchlists WHERE id = ?', [id]);
+  return { changes: result.changes };
+};
+
+export const getWatchlistItems = async (watchlistId) => {
+  return await dbAll(
+    'SELECT * FROM watchlist_items WHERE watchlist_id = ? ORDER BY added_date DESC',
+    [watchlistId]
+  );
+};
+
+export const addWatchlistItem = async (watchlistId, ticker, companyName, notes = null, targetEntry = null, alertPrice = null) => {
+  try {
+    const result = await dbRun(
+      `INSERT INTO watchlist_items (watchlist_id, ticker, company_name, notes, target_entry, alert_price)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [watchlistId, ticker, companyName, notes, targetEntry, alertPrice]
+    );
+    return { lastInsertRowid: result.lastID, changes: result.changes };
+  } catch (error) {
+    if (error.message.includes('UNIQUE constraint failed')) {
+      throw new Error('Stock already in watchlist');
+    }
+    throw error;
+  }
+};
+
+export const updateWatchlistItem = async (watchlistId, ticker, updates) => {
+  const { notes, target_entry, alert_price } = updates;
+  const result = await dbRun(
+    `UPDATE watchlist_items
+     SET notes = COALESCE(?, notes),
+         target_entry = COALESCE(?, target_entry),
+         alert_price = COALESCE(?, alert_price)
+     WHERE watchlist_id = ? AND ticker = ?`,
+    [notes, target_entry, alert_price, watchlistId, ticker]
+  );
+  return { changes: result.changes };
+};
+
+export const deleteWatchlistItem = async (watchlistId, ticker) => {
+  const result = await dbRun(
+    'DELETE FROM watchlist_items WHERE watchlist_id = ? AND ticker = ?',
+    [watchlistId, ticker]
+  );
+  return { changes: result.changes };
+};
+
+// Get all watchlist items with alert_price set (for alert checking)
+export const getWatchlistItemsWithAlerts = async () => {
+  return await dbAll(
+    `SELECT wi.*, w.name as watchlist_name
+     FROM watchlist_items wi
+     JOIN watchlists w ON wi.watchlist_id = w.id
+     WHERE wi.alert_price IS NOT NULL OR wi.target_entry IS NOT NULL`
+  );
 };

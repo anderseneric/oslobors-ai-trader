@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Lightbulb, RefreshCw, Clock, TrendingUp, TrendingDown, Target, Shield, Calendar, PieChart, Zap, AlertCircle } from 'lucide-react'
+import { Lightbulb, RefreshCw, Clock, TrendingUp, TrendingDown, Target, Shield, Calendar, PieChart, Zap, AlertCircle, UserCheck } from 'lucide-react'
 import { recommendationsAPI } from '../services/api'
 import type { Recommendation } from '../types'
+import DataWarningBanner from '../components/DataWarningBanner'
 
 export default function Recommendations() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([])
@@ -110,6 +111,12 @@ export default function Recommendations() {
 
   return (
     <div className="space-y-6">
+      {/* Data Warning Banner */}
+      <DataWarningBanner
+        message="Recommendations based on news analysis. Market data temporarily unavailable due to API rate limiting."
+        type="info"
+      />
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-4">
@@ -188,7 +195,7 @@ export default function Recommendations() {
               <div className="flex items-start justify-between mb-4">
                 <div>
                   <h3 className="text-2xl font-bold text-blue-400">{rec.ticker}</h3>
-                  <div className="flex items-center space-x-2 mt-1">
+                  <div className="flex items-center flex-wrap gap-2 mt-1">
                     <span className={`px-3 py-1 rounded-full text-sm font-semibold flex items-center space-x-1 ${getRecommendationColor(rec.recommendation)}`}>
                       {getRecommendationIcon(rec.recommendation)}
                       <span>{rec.recommendation.replace('_', ' ')}</span>
@@ -196,6 +203,17 @@ export default function Recommendations() {
                     <span className="text-sm text-gray-400">
                       Confidence: <strong className="text-white">{rec.confidence}%</strong>
                     </span>
+                    {rec.insider_score !== undefined && rec.insider_score > 0 && (
+                      <span className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center space-x-1 ${
+                        rec.insider_score >= 80 ? 'bg-green-500/20 text-green-400 border border-green-500/30' :
+                        rec.insider_score >= 65 ? 'bg-green-500/10 text-green-400 border border-green-500/20' :
+                        rec.insider_score >= 50 ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' :
+                        'bg-gray-500/10 text-gray-400 border border-gray-500/20'
+                      }`}>
+                        <UserCheck className="w-3 h-3" />
+                        <span>Insider: {rec.insider_score}</span>
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -208,7 +226,9 @@ export default function Recommendations() {
                     Entry Range
                   </div>
                   <div className="text-lg font-semibold text-green-400">
-                    {rec.entry_range[0].toFixed(2)} - {rec.entry_range[1].toFixed(2)} NOK
+                    {rec.entry_range && rec.entry_range[0] !== null && rec.entry_range[1] !== null
+                      ? `${rec.entry_range[0].toFixed(2)} - ${rec.entry_range[1].toFixed(2)} NOK`
+                      : <span className="text-gray-500 text-sm">News-based analysis</span>}
                   </div>
                 </div>
 
@@ -218,7 +238,9 @@ export default function Recommendations() {
                     Target Price
                   </div>
                   <div className="text-lg font-semibold text-blue-400">
-                    {rec.target_price.toFixed(2)} NOK
+                    {rec.target_price !== null
+                      ? `${rec.target_price.toFixed(2)} NOK`
+                      : <span className="text-gray-500 text-sm">News-based analysis</span>}
                   </div>
                 </div>
 
@@ -228,7 +250,9 @@ export default function Recommendations() {
                     Stop Loss
                   </div>
                   <div className="text-lg font-semibold text-red-400">
-                    {rec.stop_loss.toFixed(2)} NOK
+                    {rec.stop_loss !== null
+                      ? `${rec.stop_loss.toFixed(2)} NOK`
+                      : <span className="text-gray-500 text-sm">News-based analysis</span>}
                   </div>
                 </div>
 
@@ -238,7 +262,7 @@ export default function Recommendations() {
                     Risk/Reward
                   </div>
                   <div className="text-lg font-semibold text-yellow-400">
-                    {rec.risk_reward_ratio}
+                    {rec.risk_reward_ratio || <span className="text-gray-500 text-sm">News-based analysis</span>}
                   </div>
                 </div>
               </div>
@@ -247,11 +271,11 @@ export default function Recommendations() {
               <div className="grid grid-cols-2 gap-4 mb-4 text-sm">
                 <div className="flex items-center text-gray-400">
                   <Calendar className="w-4 h-4 mr-2" />
-                  <span>Hold: <strong className="text-white">{rec.hold_period}</strong></span>
+                  <span>Hold: <strong className="text-white">{rec.hold_period || <span className="text-gray-500">News-based</span>}</strong></span>
                 </div>
                 <div className="flex items-center text-gray-400">
                   <PieChart className="w-4 h-4 mr-2" />
-                  <span>Position: <strong className="text-white">{rec.position_size_percent}%</strong></span>
+                  <span>Position: <strong className="text-white">{rec.position_size_percent !== null ? `${rec.position_size_percent}%` : <span className="text-gray-500">News-based</span>}</strong></span>
                 </div>
               </div>
 

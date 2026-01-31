@@ -1,11 +1,24 @@
 import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+// Load .env from project root
+dotenv.config({ path: join(__dirname, '../../.env'), override: true });
+
+// Lazy-load Anthropic client to ensure env vars are loaded
+let anthropic = null;
+function getAnthropicClient() {
+  if (!anthropic) {
+    anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+    });
+  }
+  return anthropic;
+}
 
 // Cache for sentiment analysis (24 hours)
 const sentimentCache = new Map();
@@ -48,7 +61,7 @@ Return ONLY a JSON object in this exact format (no markdown, no explanation):
   "confidence": 0.85
 }`;
 
-    const message = await anthropic.messages.create({
+    const message = await getAnthropicClient().messages.create({
       model: process.env.CLAUDE_MODEL || 'claude-3-5-sonnet-20241022',
       max_tokens: 256,
       messages: [{
@@ -153,7 +166,7 @@ Return ONLY a JSON array with ${uncachedItems.length} objects (no markdown, no e
   ...
 ]`;
 
-    const message = await anthropic.messages.create({
+    const message = await getAnthropicClient().messages.create({
       model: process.env.CLAUDE_MODEL || 'claude-3-5-sonnet-20241022',
       max_tokens: 1024,
       messages: [{
